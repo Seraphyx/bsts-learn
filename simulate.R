@@ -179,7 +179,7 @@ model$coefficients
 set.seed(61531)
 
 ### Parameters
-n_time_points <- 52 * 1
+n_time_points <- 52 * 2
 m_samples_per_time <- 7
 N_total <- n_time_points * m_samples_per_time
 sd_y <- 3
@@ -187,6 +187,8 @@ sd_y <- 3
 sd_trend <- 2
 # Regression
 coef_x1 <- 0.70
+coef_x2 <- 5.0
+coef_x4_x2 <- 0.5  # Correlation with another variable
 # Season
 coef_season_scale <- 50
 sd_season <- 5
@@ -208,6 +210,9 @@ plot(trend, type = 'o')
 # Make a predictor that is a constant
 # x_1_raw <- cumsum(rnorm(N_total, mean = 0, sd = 4))
 x_1_raw <- arima.sim(model = list(ar = 0.75, sd = 4), n = N_total)
+x_2_raw <- arima.sim(model = list(ar = 0.50, sd = 2), n = N_total)
+x_3_fake <- arima.sim(model = list(ar = 0.90, sd = 10), n = N_total)
+x_4_raw <- x_2_raw * coef_x4_x2 + rnorm(N_total, sd = 1)
 plot(x_1_raw, type = 'o')
 
 # Simulation
@@ -215,7 +220,7 @@ s_season <- rep(coef_season_scale * coef_season, N_total/n_seasons) +
   rnorm(N_total, sd = sd_season)
 
 # Combine the effect of trend, regression, and season
-y_hat <- trend + x_1_raw * coef_x1 + s_season
+y_hat <- trend + (x_1_raw * coef_x1) + (x_2_raw * coef_x2) + s_season
   
 # Make actuals with systematic noise
 y <- rnorm(length(y_hat), y_hat, sd_y)
@@ -233,6 +238,9 @@ sim_df_1 <- data.frame(
   y = y,
   y_hat = y_hat,
   x_1 = x_1_raw,
+  x_2 = x_2_raw,
+  x_3 = x_3_fake,
+  x_4 = x_4_raw,
   trend = trend,
   s_season = s_season,
   stringsAsFactors = F
@@ -250,28 +258,57 @@ pairs(sim_df_1, lower.panel = panel.cor)
 # Run the model with a local level trend, and an unnecessary seasonal component.
 ss <- AddLocalLevel(list(), y)
 ss <- AddSeasonal(ss, y, nseasons = 7)
-model <- bsts(y ~ x_1_raw, ss, niter = 1000, timestamps = timestamps,
+model <- bsts(y ~ x_1, 
+              data = sim_df_1, ss, niter = 1000, timestamps = timestamps,
               seed = 8675309)
+model_2 <- bsts(y ~ x_1 + x_2, 
+                data = sim_df_1, ss, niter = 1000, timestamps = timestamps,
+                seed = 8675309)
+model_3 <- bsts(y ~ x_1 + x_2 + x_3, 
+                data = sim_df_1, ss, niter = 1000, timestamps = timestamps,
+                seed = 8675309)
+model_4 <- bsts(y ~ x_1 + x_2 + x_3 + x_4, 
+                data = sim_df_1, ss, niter = 1000, timestamps = timestamps,
+                seed = 8675309)
 
 # View Model
-plot(model, "state")
-plot(model, "components", same.scale = F)
+plot(model_3, "state")
+plot(model_3, "components", same.scale = F)
 plot(model, "residuals")
-plot(model, "coefficients")
+plot(model_4, "coefficients")
 plot(model, "prediction.errors")
 plot(model, "forecast.distribution")
 plot(model, "predictors")
 plot(model, "size")
-# plot(model, "dynamic")
 plot(model, "seasonal")
 plot(model, "help")
+# plot(model, "dynamic")
+CompareBstsModels(list("x1" = model,
+                       "x1 + x2" = model_2,
+                       "x1 + x2 + x3" = model_3,
+                       "x1 + x2 + x3 + x4" = model_4))
 
-#' @param sigma.obs is the systematic error given every effect. In our simulation it is 'sd_y'
+#' @param sigma.obs is the systemmatic error given every effect. In our simulation it is 'sd_y'
 #' @param sigma.level is the systemmatic error for the trend. In our simulation it is 'sd_trend'
+#' @param sigma.seasonal is the systemmatic error for the seasonal effect. In our simulation it is 'sd_season'
 #' @param coefficients are the regressors and season
+mean(model$sigma.obs)
+sd_y
+mean(model$sigma.level)
+sd_trend
+mean(model$sigma.seasonal)
+sd_season
+
+
 names(model)
 model$coefficients
 model$state.contributions
+test <- sapply(seq_len(dim(model$state.contributions)[1]), function(x) {
+  apply(model$state.contributions[x,,], 1, mean)
+})
+mean_contrib <- t(test)
+
+lapply(model$state.specification, function(x) x$name)
 
 for(c in seq_along(names(model))) {
   print(paste("==========================", c))
@@ -281,15 +318,17 @@ for(c in seq_along(names(model))) {
 
 ### Compare Estimated vs Actual
 # Get coefficients
+model = model_4
 coef_df <- data.frame(
-  coef = colnames(model$coefficients),
-  est  = apply(model$coefficients, 2, mean),
-  se   = apply(model$coefficients, 2, sd)/sqrt(model$niter),
-  sd   = apply(model$coefficients, 2, sd),
+  coef  = colnames(model$coefficients),
+  est   = apply(model$coefficients, 2, mean),
+  se    = apply(model$coefficients, 2, sd)/sqrt(model$niter),
+  sd    = apply(model$coefficients, 2, sd),
   lb_95 = qnorm(0.025) * apply(model$coefficients, 2, sd),
   ub_95 = qnorm(0.925) * apply(model$coefficients, 2, sd),
   stringsAsFactors = F
 )
+coef_df
 plot(model$log.likelihood)
 model$state.contributions
 
