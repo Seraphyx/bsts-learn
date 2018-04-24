@@ -4,6 +4,19 @@
 #' See: 
 #' \link{https://docs.google.com/viewer?a=v&pid=sites&srcid=ZGVmYXVsdGRvbWFpbnxzdGV2ZXRoZWJheWVzaWFufGd4OjI2ZGEwMTk4M2VmOWRkOTE}
 #' 
+#' "In the engineering literature, it was common practice to assume
+# the structure of the dynamic system as known, except for the effects of random
+# disturbances, the main problem being to find an optimal estimate of the
+# state of the system, given the model. In time series analysis, the emphasis is
+# somehow different. The physical interpretation of the underlying states of the
+# dynamic system is often less evident than in engineering applications. What
+# we have is the observable process, and even if we can find convenient to think
+# of it as the output of a dynamic system, the problem of forecasting is often
+# the most relevant. In this context, the problem of model building can be more
+# difficult, and even when a state-space representation is obtained, there are
+# usually quantities or parameters in the model that are unknown."
+#' 
+#' 
 
 require(bsts)
 require(ggplot2)
@@ -69,6 +82,30 @@ panel.cor <- function(x, y, digits = 2, prefix = "", cex.cor, ...)
   txt <- paste0(prefix, txt)
   if(missing(cex.cor)) cex.cor <- 0.8/strwidth(txt)
   text(0.5, 0.5, txt, cex = cex.cor * r)
+}
+
+
+
+warp_reg <- function(x, multiplier = 0.5, shape = 4, scale = 4,  lag = 1, extend = 0) {
+  n = length(x)
+  m = n
+  if(extend > 0) {
+    m = m + extend
+  }
+  
+  # Get Individual effect
+  effect_i <- (shape/20) * (1:m)
+  effect <- dgamma(effect_i, shape, scale)
+  effect_mat <- matrix(rep(effect, n), byrow = T, nrow = n)
+  effect_y <- x * effect_mat * multiplier
+  
+  # Combine Effect
+  effect_comb <- rep(0, n)
+  for(i in seq_len(n)) {
+    effect_comb <- effect_comb + lag(effect_y[i,], n = i - 1, default = 0)
+  }
+  
+  return(effect_comb)
 }
 
 
@@ -186,9 +223,10 @@ sd_y <- 3
 # Trend
 sd_trend <- 2
 # Regression
-coef_x1 <- 0.70
+coef_x1 <- 2.0
 coef_x2 <- 5.0
 coef_x4_x2 <- 0.5  # Correlation with another variable
+coef_x5_x1 <- 0.8
 # Season
 coef_season_scale <- 50
 sd_season <- 5
@@ -212,7 +250,8 @@ plot(trend, type = 'o')
 x_1_raw <- arima.sim(model = list(ar = 0.75, sd = 4), n = N_total)
 x_2_raw <- arima.sim(model = list(ar = 0.50, sd = 2), n = N_total)
 x_3_fake <- arima.sim(model = list(ar = 0.90, sd = 10), n = N_total)
-x_4_raw <- x_2_raw * coef_x4_x2 + rnorm(N_total, sd = 1)
+x_4_raw <- x_2_raw * coef_x4_x2 + rnorm(N_total, sd = 1)  # Only correlated with x_2
+x_5_raw <- warp_reg(as.numeric(x_1_raw), multiplier = coef_x5_x1, shape = 4, scale = 4,  lag = 1, extend = 0)  # Non-linear lagged effect
 plot(x_1_raw, type = 'o')
 
 # Simulation
@@ -220,7 +259,7 @@ s_season <- rep(coef_season_scale * coef_season, N_total/n_seasons) +
   rnorm(N_total, sd = sd_season)
 
 # Combine the effect of trend, regression, and season
-y_hat <- trend + (x_1_raw * coef_x1) + (x_2_raw * coef_x2) + s_season
+y_hat <- trend + (x_1_raw * coef_x1) + (x_2_raw * coef_x2) + x_5_raw + s_season
   
 # Make actuals with systematic noise
 y <- rnorm(length(y_hat), y_hat, sd_y)
@@ -241,6 +280,7 @@ sim_df_1 <- data.frame(
   x_2 = x_2_raw,
   x_3 = x_3_fake,
   x_4 = x_4_raw,
+  x_5 = x_5_raw,
   trend = trend,
   s_season = s_season,
   stringsAsFactors = F
@@ -258,7 +298,7 @@ pairs(sim_df_1, lower.panel = panel.cor)
 # Run the model with a local level trend, and an unnecessary seasonal component.
 ss <- AddLocalLevel(list(), y)
 ss <- AddSeasonal(ss, y, nseasons = 7)
-model <- bsts(y ~ x_1, 
+model_1 <- bsts(y ~ x_1, 
               data = sim_df_1, ss, niter = 1000, timestamps = timestamps,
               seed = 8675309)
 model_2 <- bsts(y ~ x_1 + x_2, 
@@ -270,12 +310,20 @@ model_3 <- bsts(y ~ x_1 + x_2 + x_3,
 model_4 <- bsts(y ~ x_1 + x_2 + x_3 + x_4, 
                 data = sim_df_1, ss, niter = 1000, timestamps = timestamps,
                 seed = 8675309)
+model_5 <- bsts(y ~ x_1 + x_2 + x_3 + x_4 + x_5, 
+                data = sim_df_1, ss, niter = 1000, timestamps = timestamps,
+                seed = 8675309)
+
+
+### Diagnostics
+model <- model_5
+
 
 # View Model
-plot(model_3, "state")
-plot(model_3, "components", same.scale = F)
+plot(model, "state")
+plot(model, "components", same.scale = F)
 plot(model, "residuals")
-plot(model_4, "coefficients")
+plot(model, "coefficients")
 plot(model, "prediction.errors")
 plot(model, "forecast.distribution")
 plot(model, "predictors")
@@ -283,10 +331,11 @@ plot(model, "size")
 plot(model, "seasonal")
 plot(model, "help")
 # plot(model, "dynamic")
-CompareBstsModels(list("x1" = model,
+CompareBstsModels(list("x1" = model_1,
                        "x1 + x2" = model_2,
                        "x1 + x2 + x3" = model_3,
-                       "x1 + x2 + x3 + x4" = model_4))
+                       "x1 + x2 + x3 + x4" = model_4,
+                       "x1 + x2 + x3 + x4 + x5" = model_5))
 
 #' @param sigma.obs is the systemmatic error given every effect. In our simulation it is 'sd_y'
 #' @param sigma.level is the systemmatic error for the trend. In our simulation it is 'sd_trend'
@@ -322,7 +371,7 @@ model = model_4
 coef_df <- data.frame(
   coef  = colnames(model$coefficients),
   est   = apply(model$coefficients, 2, mean),
-  se    = apply(model$coefficients, 2, sd)/sqrt(model$niter),
+  se    = apply(model$coefficients, 2, sd)/sqrt(N_total),
   sd    = apply(model$coefficients, 2, sd),
   lb_95 = qnorm(0.025) * apply(model$coefficients, 2, sd),
   ub_95 = qnorm(0.925) * apply(model$coefficients, 2, sd),
@@ -338,7 +387,56 @@ qqline(model$coefficients[,2][model$coefficients[,2] != 0])
 
 
 
+###################################################################################################
+# Simulate with Non-constant
+###################################################################################################
+
+#' For Dynamic Regressors see page 43: \link{http://people.bordeaux.inria.fr/pierre.delmoral/dynamics-linear-models.petris_et_al.pdf}
+#' 
+ss_dynamic <- AddDynamicRegression(ss, y ~ x_5, data = sim_df_1)
+model_dynamic <- bsts(y ~ x_1 + x_2 + x_3 + x_4,
+                data = sim_df_1, ss_dynamic, niter = 1000, timestamps = timestamps,
+                seed = 8675309)
+
+plot(model_dynamic, "state")
+plot(model_dynamic, "components")
+plot(model_dynamic, "coefficients")
+plot(model_dynamic, "dynamic")
+
+
+names(model_dynamic)[!(names(model_dynamic) %in% names(model))]
+model_dynamic$dynamic.regression.coefficients
+rownames(model_dynamic$dynamic.regression.coefficients[1,,])
+mean(model_dynamic$sigma.obs)
+
+# Reduce
+dynamic_reg_raw <- sapply(seq_len(dim(model_dynamic$dynamic.regression.coefficients)[3]), function(x) {
+  if(is.null(dim(model_dynamic$dynamic.regression.coefficients[,,x]))) {
+    mean(model_dynamic$dynamic.regression.coefficients[,,x])
+  } else {
+    apply(model_dynamic$dynamic.regression.coefficients[,,x], 2, mean)
+  }
+})
+if(is.null(dim(dynamic_reg_raw))) {
+  dynamic_reg <- dynamic_reg_raw
+  print(mean(dynamic_reg))
+  print(sd(dynamic_reg))
+} else {
+  dynamic_reg <- t(dynamic_reg_raw)
+  print(apply(dynamic_reg, 2, mean))
+  print(apply(dynamic_reg, 2, sd))
+}
+sum(x_4_raw)/sum(x_1_raw)
+c(coef_x1, coef_x2)
+plot(x = seq_along(dynamic_reg[,1]), y = dynamic_reg[,1], type = 'l')
+lines(x = seq_along(dynamic_reg[,1]), y = dynamic_reg[,2], col = 'red')
 
 
 
-
+x = rnorm(100, sd = 5) + 10
+y = warp_reg(x, shape = 4, extend = 100)
+plot(seq_along(y), y, type = 'o')
+lines(seq_along(x), x, col = 2)
+abline(h = 10, col = 3)
+# plot(seq_along(y), y / x, type = 'l')
+sum(y)/sum(x)
